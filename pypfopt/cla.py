@@ -9,6 +9,8 @@ import numpy as np
 import pandas as pd
 from . import base_optimizer
 
+# [ADDED] Constant for small numerical adjustments
+EPSILON = 1e-5
 
 class CLA(base_optimizer.BaseOptimizer):
 
@@ -64,7 +66,7 @@ class CLA(base_optimizer.BaseOptimizer):
         # Initialize the class
         self.mean = np.array(expected_returns).reshape((len(expected_returns), 1))
         if (self.mean == np.ones(self.mean.shape) * self.mean.mean()).all():
-            self.mean[-1, 0] += 1e-5
+            self.mean[-1, 0] += EPSILON #Changed number to variable for improved readability
         self.expected_returns = self.mean.reshape((len(self.mean),))
         self.cov_matrix = np.asarray(cov_matrix)
 

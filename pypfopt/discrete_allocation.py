@@ -7,9 +7,11 @@ import numpy as np
 import pandas as pd
 import cvxpy as cp
 from . import exceptions
+import logging  # [ADDED]
+logger = logging.getLogger(__name__)  # [ADDED]
 
 
-def get_latest_prices(prices):
+def get_latest_prices(prices: pd.DataFrame) -> pd.Series:  # [ADDED type hint]
     """
     A helper tool which retrieves the most recent asset prices from a dataframe of
     asset prices, required in order to generate a discrete allocation.
@@ -111,13 +113,14 @@ class DiscreteAllocation:
                 allocation_weight = 0
             sse += (weight - allocation_weight) ** 2
             if verbose:
-                print(
+                # [CHANGED from print]
+                logger.info(
                     "{}: allocated {:.3f}, desired {:.3f}".format(
                         ticker, allocation_weight, weight
                     )
                 )
         rmse = np.sqrt(sse / len(self.weights))
-        print("Allocation has RMSE: {:.3f}".format(rmse))
+        logger.info("Allocation has RMSE: {:.3f}".format(rmse)) # [CHANGED from print]
         return rmse
 
     def greedy_portfolio(self, verbose=False):
@@ -149,7 +152,7 @@ class DiscreteAllocation:
             short_val = self.total_portfolio_value * self.short_ratio
 
             if verbose:
-                print("\nAllocating long sub-portfolio...")
+                logger.info("\nAllocating long sub-portfolio...")# [CHANGED from print]
             da1 = DiscreteAllocation(
                 longs,
                 self.latest_prices[longs.keys()],
@@ -158,7 +161,7 @@ class DiscreteAllocation:
             long_alloc, long_leftover = da1.greedy_portfolio()
 
             if verbose:
-                print("\nAllocating short sub-portfolio...")
+                logger.info("\nAllocating short sub-portfolio...")# [CHANGED from print]
             da2 = DiscreteAllocation(
                 shorts,
                 self.latest_prices[shorts.keys()],
@@ -189,7 +192,7 @@ class DiscreteAllocation:
                 # Buy as many as possible
                 n_shares = available_funds // price
                 if n_shares == 0:
-                    print("Insufficient funds")
+                    logger.info("Insufficient funds")# [CHANGED from print]
             available_funds -= cost
             shares_bought.append(n_shares)
             buy_prices.append(price)
@@ -237,7 +240,7 @@ class DiscreteAllocation:
         )
 
         if verbose:
-            print("Funds remaining: {:.2f}".format(available_funds))
+            logger.info("Funds remaining: {:.2f}".format(available_funds))# [CHANGED from print]
             self._allocation_rmse_error(verbose)
         return self.allocation, available_funds
 
@@ -266,7 +269,7 @@ class DiscreteAllocation:
             short_val = self.total_portfolio_value * self.short_ratio
 
             if verbose:
-                print("\nAllocating long sub-portfolio:")
+                logger.info("\nAllocating long sub-portfolio:")# [CHANGED from print]
             da1 = DiscreteAllocation(
                 longs,
                 self.latest_prices[longs.keys()],
@@ -275,7 +278,7 @@ class DiscreteAllocation:
             long_alloc, long_leftover = da1.lp_portfolio()
 
             if verbose:
-                print("\nAllocating short sub-portfolio:")
+                logger.info("\nAllocating short sub-portfolio:")# [CHANGED from print]
             da2 = DiscreteAllocation(
                 shorts,
                 self.latest_prices[shorts.keys()],
@@ -317,6 +320,6 @@ class DiscreteAllocation:
         )
 
         if verbose:
-            print("Funds remaining: {:.2f}".format(r.value))
+            logger.info("Funds remaining: {:.2f}".format(r.value))# [CHANGED from print]
             self._allocation_rmse_error()
         return self.allocation, r.value

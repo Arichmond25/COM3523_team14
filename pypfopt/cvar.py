@@ -6,11 +6,23 @@ from . import expected_returns
 from scipy import optimize
 import cvxpy as cp
 import warnings
+import logging  # [ADDED]
+logger = logging.getLogger(__name__)  # [ADDED]
 
 
 class CVar(base_optimizer.BaseConvexOptimizer):
-    def __init__(self, returns, expected_returns,
-                 cov_matrix, beta=0.95, verbose=False):
+    def __init__(self, returns: pd.DataFrame, expected_returns: pd.Series,
+                 cov_matrix: pd.DataFrame, beta: float = 0.95, verbose: bool = False):  # [ADDED type hints]
+        """
+        [ADDED] Initialize the CVar optimizer.
+        Initialize the CVar optimizer.
+        Args:
+            returns (pd.DataFrame): Historical return data.
+            expected_returns (pd.Series): Expected asset returns.
+            cov_matrix (pd.DataFrame): Covariance matrix of returns.
+            beta (float): Confidence level for CVaR. Default is 0.95.
+            verbose (bool): If True, show solver output.
+        """
 
         if returns is None:
             raise ValueError("Returns must be provided")
@@ -33,9 +45,10 @@ class CVar(base_optimizer.BaseConvexOptimizer):
     @staticmethod
     def _validate_expected_returns(expected_returns):
         if expected_returns is None:
-            warnings.warn(
+            # [CHANGED from warnings.warn]
+            logger.warning (
                 "No expected returns provided. You may only use ef.min_volatility()"
-            )
+            ) 
             return None
         elif isinstance(expected_returns, pd.Series):
             return expected_returns.values
