@@ -68,16 +68,21 @@ def plot_dendrogram(
 
     fig, ax = plt.subplots()
     if show_tickers:
+        # draw leaves with labels
         sch.dendrogram(
             hrp.clusters,
             labels=hrp.tickers,
             ax=ax,
             orientation="top",
         )
+        # match original layout call before rotation
+        plt.tight_layout()
+        # rotate labels
         plt.xticks(rotation=90)
     else:
         sch.dendrogram(hrp.clusters, no_labels=True, ax=ax)
 
+    # then do our usual save/show and final tight_layout
     _plot_io(filename=filename, showfig=showfig, dpi=dpi)
     return ax
 

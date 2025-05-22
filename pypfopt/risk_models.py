@@ -3,22 +3,6 @@ The ``risk_models`` module provides functions for estimating the covariance matr
 historical returns.
 
 The format of the data input is the same as that in :ref:`expected-returns`.
-
-**Currently implemented:**
-
-- fix non-positive semidefinite matrices
-- general risk matrix function, allowing you to run any risk model from one function.
-- sample covariance
-- semicovariance
-- exponentially weighted covariance
-- minimum covariance determinant
-- shrunk covariance matrices:
-
-    - manual shrinkage
-    - Ledoit Wolf shrinkage
-    - Oracle Approximating shrinkage
-
-- covariance to correlation matrix
 """
 
 import warnings
@@ -118,18 +102,12 @@ def risk_matrix(prices, method="sample_cov", returns_data=False, **kwargs):
 
 
 def sample_cov(prices, returns_data=False, frequency=252, fix_method="spectral"):
-    """
-    Calculate the annualised sample covariance matrix of asset returns.
-    """
     rets = _ensure_returns_dataframe(prices, returns_data)
     cov = rets.cov() * frequency
     return fix_nonpositive_semidefinite(cov, fix_method)
 
 
 def semicovariance(prices, returns_data=False, benchmark=0.000079, frequency=252, fix_method="spectral"):
-    """
-    Estimate the semicovariance matrix (returns < benchmark).
-    """
     rets = _ensure_returns_dataframe(prices, returns_data)
     drops = np.fmin(rets - benchmark, 0)
     cov = drops.cov() * frequency
@@ -137,9 +115,6 @@ def semicovariance(prices, returns_data=False, benchmark=0.000079, frequency=252
 
 
 def _pair_exp_cov(X, Y, span=180):
-    """
-    Calculate the exponential covariance between two return series.
-    """
     covar = (X - X.mean()) * (Y - Y.mean())
     if span < 10:
         warnings.warn("it is recommended to use a higher span, e.g 30 days")
@@ -147,9 +122,6 @@ def _pair_exp_cov(X, Y, span=180):
 
 
 def exp_cov(prices, returns_data=False, span=180, frequency=252, fix_method="spectral"):
-    """
-    Estimate the exponentially-weighted covariance matrix.
-    """
     rets = _ensure_returns_dataframe(prices, returns_data)
     assets = rets.columns
     N = len(assets)
@@ -162,9 +134,6 @@ def exp_cov(prices, returns_data=False, span=180, frequency=252, fix_method="spe
 
 
 def min_cov_determinant(prices, returns_data=False, frequency=252, random_state=None, fix_method="spectral"):
-    """
-    Calculate the minimum covariance determinant estimator.
-    """
     prices_df = _ensure_dataframe(prices, "data is not in a dataframe")
     try:
         from sklearn import covariance
@@ -182,9 +151,6 @@ def min_cov_determinant(prices, returns_data=False, frequency=252, random_state=
 
 
 def cov_to_corr(cov_matrix):
-    """
-    Convert a covariance matrix to a correlation matrix.
-    """
     cov_df = _ensure_dataframe(cov_matrix, "cov_matrix is not a dataframe")
     Dinv = np.diag(1 / np.sqrt(np.diag(cov_df)))
     corr = Dinv @ cov_df.values @ Dinv
@@ -192,20 +158,12 @@ def cov_to_corr(cov_matrix):
 
 
 def corr_to_cov(corr_matrix, stdevs):
-    """
-    Convert a correlation matrix to a covariance matrix.
-    """
     corr_df = _ensure_dataframe(corr_matrix, "cov_matrix is not a dataframe")
     cov = corr_df.values * np.outer(stdevs, stdevs)
     return pd.DataFrame(cov, index=corr_df.index, columns=corr_df.index)
 
 
 class CovarianceShrinkage:
-    """
-    Methods for computing shrinkage estimates of the covariance matrix,
-    using various targets (Ledoit–Wolf, Oracle Approximating, etc.).
-    """
-
     def __init__(self, prices, returns_data=False, frequency=252):
         try:
             from sklearn import covariance
@@ -224,17 +182,12 @@ class CovarianceShrinkage:
         self.S = self.X.cov().values
         self.delta = None
 
-
     def _format_and_annualize(self, raw_cov):
         assets = self.X.columns
         cov = pd.DataFrame(raw_cov, index=assets, columns=assets) * self.frequency
         return fix_nonpositive_semidefinite(cov, fix_method="spectral")
 
-
     def shrunk_covariance(self, delta=0.2):
-        """
-        Manual shrinkage to the identity target.
-        """
         self.delta = delta
         N = self.S.shape[1]
         mu = np.trace(self.S) / N
@@ -242,11 +195,7 @@ class CovarianceShrinkage:
         shrunk = delta * F + (1 - delta) * self.S
         return self._format_and_annualize(shrunk)
 
-
     def ledoit_wolf(self, shrinkage_target="constant_variance"):
-        """
-        Ledoit–Wolf shrinkage estimator for various targets.
-        """
         if shrinkage_target == "constant_variance":
             arr = np.nan_to_num(self.X.values)
             shrunk, self.delta = self.covariance.ledoit_wolf(arr)
@@ -258,11 +207,7 @@ class CovarianceShrinkage:
             raise NotImplementedError(f"Shrinkage target {shrinkage_target} not recognised")
         return self._format_and_annualize(shrunk)
 
-
     def _ledoit_wolf_single_factor(self):
-        """
-        Helper: Ledoit–Wolf single-factor shrinkage target.
-        """
         X = np.nan_to_num(self.X.values)
         t, n = X.shape
         Xm = X - X.mean(axis=0)
@@ -301,54 +246,59 @@ class CovarianceShrinkage:
         shrunk = delta * F + (1 - delta) * sample
         return shrunk, delta
 
-
     def _ledoit_wolf_constant_correlation(self):
         """
-        Helper: Ledoit–Wolf constant-correlation shrinkage target.
+        Helper method to calculate the Ledoit-Wolf shrinkage estimate
+        with the constant correlation matrix as the shrinkage target.
+        See Ledoit and Wolf (2003)
+
+        :return: shrunk sample covariance matrix, shrinkage constant
+        :rtype: np.ndarray, float
         """
         X = np.nan_to_num(self.X.values)
         t, n = X.shape
-        S = self.S
+        S = self.S  # sample cov matrix
 
+        # Constant correlation target
         var = np.diag(S).reshape(-1, 1)
         std = np.sqrt(var)
-        _var = np.tile(var, (n, n))
-        _std = np.tile(std, (n, n))
+        _var = np.tile(var, (n,))
+        _std = np.tile(std, (n,))
         r_bar = (np.sum(S / (_std * _std.T)) - n) / (n * (n - 1))
-
         F = r_bar * (_std * _std.T)
         F[np.eye(n) == 1] = var.reshape(-1)
 
+        # Estimate pi
         Xm = X - X.mean(axis=0)
         y = Xm ** 2
-        pi_mat = (y.T @ y) / t - 2 * (Xm.T @ Xm) * S / t + S ** 2
+        pi_mat = np.dot(y.T, y) / t - 2 * np.dot(Xm.T, Xm) * S / t + S ** 2
         pi_hat = np.sum(pi_mat)
 
-        term1 = (Xm ** 3).T @ Xm / t
-        help_ = Xm.T @ Xm / t
+        # Theta matrix, expanded term by term
+        term1 = np.dot((Xm ** 3).T, Xm) / t
+        help_ = np.dot(Xm.T, Xm) / t
         help_diag = np.diag(help_)
         term2 = np.tile(help_diag, (n, 1)).T * S
         term3 = help_ * _var
         term4 = _var * S
-        theta = term1 - term2 - term3 + term4
-        theta[np.eye(n) == 1] = 0
-        rho_hat = (
-            np.sum(np.diag(pi_mat))
-            + r_bar * np.sum((1 / std) @ std.T * theta)
+        theta_mat = term1 - term2 - term3 + term4
+        theta_mat[np.eye(n) == 1] = np.zeros(n)
+        rho_hat = sum(np.diag(pi_mat)) + r_bar * np.sum(
+            np.dot((1 / std), std.T) * theta_mat
         )
 
+        # Estimate gamma
         gamma_hat = np.linalg.norm(S - F, "fro") ** 2
+
+        # Compute shrinkage constant
         kappa_hat = (pi_hat - rho_hat) / gamma_hat
         delta = max(0.0, min(1.0, kappa_hat / t))
 
-        shrunk = delta * F + (1 - delta) * S
-        return shrunk, delta
-
+        # Compute shrunk covariance matrix
+        shrunk_cov = delta * F + (1 - delta) * S
+        return shrunk_cov, delta
 
     def oracle_approximating(self):
-        """
-        Oracle Approximating Shrinkage estimator.
-        """
         arr = np.nan_to_num(self.X.values)
-        shrunk, self.delta = self.covariance.oas(arr)
-        return self._format_and_annualize(shrunk)
+        shrunk_cov, self.delta = self.covariance.oas(arr)
+        return self._format_and_annualize(shrunk_cov)
