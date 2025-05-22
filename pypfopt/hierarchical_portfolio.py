@@ -5,11 +5,6 @@ portfolio optimisation – the application of hierarchical clustering models in 
 All of the hierarchical classes have a similar API to ``EfficientFrontier``, though since
 many hierarchical models currently don't support different objectives, the actual allocation
 happens with a call to `optimize()`.
-
-Currently implemented:
-
-- ``HRPOpt`` implements the Hierarchical Risk Parity (HRP) portfolio. Code reproduced with
-  permission from Marcos Lopez de Prado (2016).
 """
 
 import collections
@@ -23,180 +18,126 @@ from . import base_optimizer, risk_models
 
 class HRPOpt(base_optimizer.BaseOptimizer):
     """
-    A HRPOpt object (inheriting from BaseOptimizer) constructs a hierarchical
-    risk parity portfolio.
+    A HRPOpt object constructs a Hierarchical Risk Parity portfolio.
 
     Instance variables:
-
-    - Inputs
-
-        - ``n_assets`` - int
-        - ``tickers`` - str list
-        - ``returns`` - pd.Series
-
-    - Output:
-
-        - ``weights`` - np.ndarray
-        - ``clusters`` - linkage matrix corresponding to clustered assets.
+    - ``returns``: pd.DataFrame of asset returns (or None if using a precomputed covariance).
+    - ``cov_matrix``: pd.DataFrame of asset covariances (or None if using returns).
+    - ``clusters``: linkage matrix from the last `optimize()` call.
 
     Public methods:
-
-    - ``optimize()`` calculates weights using HRP
-    - ``portfolio_performance()`` calculates the expected return, volatility and Sharpe ratio for
-      the optimised portfolio.
-    - ``set_weights()`` creates self.weights (np.ndarray) from a weights dict
-    - ``clean_weights()`` rounds the weights and clips near-zeros.
-    - ``save_weights_to_file()`` saves the weights to csv, json, or txt.
+    - `optimize()`: computes and sets `self.weights` (an OrderedDict).
+    - `portfolio_performance()`: returns (return, vol, Sharpe) for the last weights.
     """
 
     def __init__(self, returns=None, cov_matrix=None):
-        """
-        :param returns: asset historical returns
-        :type returns: pd.DataFrame
-        :param cov_matrix: covariance of asset returns
-        :type cov_matrix: pd.DataFrame.
-        :raises TypeError: if ``returns`` is not a dataframe
-        """
         if returns is None and cov_matrix is None:
             raise ValueError("Either returns or cov_matrix must be provided")
 
-        if returns is not None and not isinstance(returns, pd.DataFrame):
-            raise TypeError("returns are not a dataframe")
+        if returns is not None:
+            if not isinstance(returns, pd.DataFrame):
+                raise TypeError("returns are not a dataframe")
+            tickers = list(returns.columns)
+        else:
+            tickers = list(cov_matrix.columns)
 
         self.returns = returns
         self.cov_matrix = cov_matrix
         self.clusters = None
-
-        if returns is None:
-            tickers = list(cov_matrix.columns)
-        else:
-            tickers = list(returns.columns)
         super().__init__(len(tickers), tickers)
 
     @staticmethod
     def _get_cluster_var(cov, cluster_items):
-        """
-        Compute the variance per cluster
-
-        :param cov: covariance matrix
-        :type cov: np.ndarray
-        :param cluster_items: tickers in the cluster
-        :type cluster_items: list
-        :return: the variance per cluster
-        :rtype: float
-        """
-        # Compute variance per cluster
+        """Compute the variance of a cluster via inverse-variance weighting."""
         cov_slice = cov.loc[cluster_items, cluster_items]
-        weights = 1 / np.diag(cov_slice)  # Inverse variance weights
-        weights /= weights.sum()
-        return np.linalg.multi_dot((weights, cov_slice, weights))
+        ivp = 1 / np.diag(cov_slice)
+        ivp /= ivp.sum()
+        return np.linalg.multi_dot((ivp, cov_slice, ivp))
 
     @staticmethod
     def _get_quasi_diag(link):
-        """
-        Sort clustered items by distance
-
-        :param link: linkage matrix after clustering
-        :type link: np.ndarray
-        :return: sorted list of indices
-        :rtype: list
-        """
+        """Traverse the linkage tree in pre-order to get a sorted list of leaf indices."""
         return sch.to_tree(link, rd=False).pre_order()
 
     @staticmethod
     def _raw_hrp_allocation(cov, ordered_tickers):
-        """
-        Given the clusters, compute the portfolio that minimises risk by
-        recursively traversing the hierarchical tree from the top.
-
-        :param cov: covariance matrix
-        :type cov: np.ndarray
-        :param ordered_tickers: list of tickers ordered by distance
-        :type ordered_tickers: str list
-        :return: raw portfolio weights
-        :rtype: pd.Series
-        """
+        """Recursively allocate weights by bisecting clusters and applying HRP."""
         w = pd.Series(1, index=ordered_tickers)
-        cluster_items = [ordered_tickers]  # initialize all items in one cluster
-
-        while len(cluster_items) > 0:
-            cluster_items = [
-                i[j:k]
-                for i in cluster_items
-                for j, k in ((0, len(i) // 2), (len(i) // 2, len(i)))
-                if len(i) > 1
-            ]  # bi-section
-            # For each pair, optimise locally.
-            for i in range(0, len(cluster_items), 2):
-                first_cluster = cluster_items[i]
-                second_cluster = cluster_items[i + 1]
-                # Form the inverse variance portfolio for this pair
-                first_variance = HRPOpt._get_cluster_var(cov, first_cluster)
-                second_variance = HRPOpt._get_cluster_var(cov, second_cluster)
-                alpha = 1 - first_variance / (first_variance + second_variance)
-                w[first_cluster] *= alpha  # weight 1
-                w[second_cluster] *= 1 - alpha  # weight 2
+        clusters = [ordered_tickers]
+        while clusters:
+            # bisect each cluster
+            clusters = [
+                group[j:k]
+                for group in clusters
+                for j, k in ((0, len(group)//2), (len(group)//2, len(group)))
+                if len(group) > 1
+            ]
+            # allocate within each pair
+            for i in range(0, len(clusters), 2):
+                left, right = clusters[i], clusters[i+1]
+                vl = HRPOpt._get_cluster_var(cov, left)
+                vr = HRPOpt._get_cluster_var(cov, right)
+                α = 1 - vl / (vl + vr)
+                w[left]   *= α
+                w[right] *= (1 - α)
         return w
+
+    def _get_corr_and_cov(self):
+        """
+        Return (corr, cov) depending on whether `self.returns` or
+        `self.cov_matrix` was provided.
+        """
+        if self.returns is None:
+            cov  = self.cov_matrix
+            corr = risk_models.cov_to_corr(cov).round(6)
+        else:
+            corr = self.returns.corr()
+            cov  = self.returns.cov()
+        return corr, cov
+
+    @staticmethod
+    def _compute_distance(corr):
+        """Convert a correlation matrix into a SciPy distance vector."""
+        m = np.sqrt(np.clip((1.0 - corr) / 2.0, a_min=0.0, a_max=1.0))
+        return ssd.squareform(m, checks=False)
 
     def optimize(self, linkage_method="single"):
         """
-        Construct a hierarchical risk parity portfolio, using Scipy hierarchical clustering
-        (see `here <https://docs.scipy.org/doc/scipy/reference/generated/scipy.cluster.hierarchy.linkage.html>`_)
-
-        :param linkage_method: which scipy linkage method to use
-        :type linkage_method: str
-        :return: weights for the HRP portfolio
-        :rtype: OrderedDict
+        Build the HRP portfolio:
+        1. get corr & cov
+        2. form distance matrix
+        3. cluster via scipy.linkage
+        4. sort leaves via pre-order
+        5. allocate via `_raw_hrp_allocation`
         """
         if linkage_method not in sch._LINKAGE_METHODS:
             raise ValueError("linkage_method must be one recognised by scipy")
 
-        if self.returns is None:
-            cov = self.cov_matrix
-            corr = risk_models.cov_to_corr(self.cov_matrix).round(6)
-        else:
-            corr, cov = self.returns.corr(), self.returns.cov()
-
-        # Compute distance matrix, with ClusterWarning fix as
-        # per https://stackoverflow.com/questions/18952587/
-
-        # this can avoid some nasty floating point issues
-        matrix = np.sqrt(np.clip((1.0 - corr) / 2.0, a_min=0.0, a_max=1.0))
-        dist = ssd.squareform(matrix, checks=False)
-
+        corr, cov = self._get_corr_and_cov()
+        dist      = HRPOpt._compute_distance(corr)
         self.clusters = sch.linkage(dist, linkage_method)
-        sort_ix = HRPOpt._get_quasi_diag(self.clusters)
-        ordered_tickers = corr.index[sort_ix].tolist()
-        hrp = HRPOpt._raw_hrp_allocation(cov, ordered_tickers)
-        weights = collections.OrderedDict(hrp.sort_index())
+
+        order = corr.index[HRPOpt._get_quasi_diag(self.clusters)].tolist()
+        raw_w = HRPOpt._raw_hrp_allocation(cov, order)
+        weights = collections.OrderedDict(raw_w.sort_index())
+
         self.set_weights(weights)
         return weights
 
     def portfolio_performance(self, verbose=False, risk_free_rate=0.02, frequency=252):
         """
-        After optimising, calculate (and optionally print) the performance of the optimal
-        portfolio. Currently calculates expected return, volatility, and the Sharpe ratio
-        assuming returns are daily
-
-        :param verbose: whether performance should be printed, defaults to False
-        :type verbose: bool, optional
-        :param risk_free_rate: risk-free rate of borrowing/lending, defaults to 0.02.
-                               The period of the risk-free rate should correspond to the
-                               frequency of expected returns.
-        :type risk_free_rate: float, optional
-        :param frequency: number of time periods in a year, defaults to 252 (the number
-                            of trading days in a year)
-        :type frequency: int, optional
-        :raises ValueError: if weights have not been calculated yet
-        :return: expected return, volatility, Sharpe ratio.
-        :rtype: (float, float, float)
+        After `optimize()`, compute (ret, vol, Sharpe). Raises ValueError if
+        called before `optimize()`.
         """
+        if self.weights is None:
+            raise ValueError("Weights have not been calculated yet")
+
         if self.returns is None:
+            mu  = None
             cov = self.cov_matrix
-            mu = None
         else:
-            cov = self.returns.cov() * frequency
-            mu = self.returns.mean() * frequency
+            mu  = self.returns.mean() * frequency
+            cov = self.returns.cov()  * frequency
 
         return base_optimizer.portfolio_performance(
             self.weights, mu, cov, verbose, risk_free_rate
