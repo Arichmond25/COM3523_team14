@@ -1,178 +1,128 @@
-"""
-The ``objective_functions`` module provides optimisation objectives, including the actual
-objective functions called by the ``EfficientFrontier`` object's optimisation methods.
-These methods are primarily designed for internal use during optimisation and each requires
-a different signature (which is why they have not been factored into a class).
-For obvious reasons, any objective function must accept ``weights``
-as an argument, and must also have at least one of ``expected_returns`` or ``cov_matrix``.
+'''
+objective_functions.py
 
-The objective functions either compute the objective given a numpy array of weights, or they
-return a cvxpy *expression* when weights are a ``cp.Variable``. In this way, the same objective
-function can be used both internally for optimisation and externally for computing the objective
-given weights. ``_objective_value()`` automatically chooses between the two behaviours.
-
-``objective_functions`` defaults to objectives for minimisation. In the cases of objectives
-that clearly should be maximised (e.g Sharpe Ratio, portfolio return), the objective function
-actually returns the negative quantity, since minimising the negative is equivalent to maximising
-the positive. This behaviour is controlled by the ``negative=True`` optional argument.
-
-Currently implemented:
-
-- Portfolio variance (i.e square of volatility)
-- Portfolio return
-- Sharpe ratio
-- L2 regularisation (minimising this reduces nonzero weights)
-- Quadratic utility
-- Transaction cost model (a simple one)
-"""
+Provides optimisation objectives for portfolio optimisation, supporting both NumPy arrays and cvxpy Variables.
+'''
+import logging
+from typing import Union, Any
 
 import numpy as np
 import cvxpy as cp
 
+# Module constants
+DEFAULT_RISK_FREE_RATE: float = 0.02
+DEFAULT_TRANSACTION_COST: float = 0.001
 
-def _objective_value(w, obj):
-    """
-    Helper method to return either the value of the objective function
-    or the objective function as a cvxpy object depending on whether
-    w is a cvxpy variable or np array.
+logger = logging.getLogger(__name__)
 
-    :param w: weights
-    :type w: np.ndarray OR cp.Variable
-    :param obj: objective function expression
-    :type obj: cp.Expression
-    :return: value of the objective function OR objective function expression
-    :rtype: float OR cp.Expression
+def _resolve_objective(
+    w: Union[np.ndarray, cp.Variable],
+    expr: Union[cp.Expression, float]
+) -> Union[float, cp.Expression]:
     """
+    Return the numeric value or cvxpy expression based on the type of 'w'.
+
+    :param w: weight vector (NumPy array or cvxpy Variable)
+    :param expr: objective expression or scalar
+    :return: evaluated numeric objective or cvxpy expression
+    """
+    # If w is a NumPy array, we need a numeric return
     if isinstance(w, np.ndarray):
-        if np.isscalar(obj):
-            return obj
-        elif np.isscalar(obj.value):
-            return obj.value
-        else:
-            return obj.value.item()
-    else:
-        return obj
+        if isinstance(expr, cp.Expression):
+            try:
+                val = expr.value
+                if np.isscalar(val):
+                    return val
+                return float(np.asarray(val).item())
+            except Exception as e:
+                logger.error("Error resolving cvxpy expression: %s", e)
+                raise
+        # expr is already numeric
+        return expr  # type: ignore
+    # For cvxpy Variable, return the expression itself
+    return expr  # type: ignore
 
 
-def portfolio_variance(w, cov_matrix):
+def portfolio_variance(
+    w: Union[np.ndarray, cp.Variable],
+    cov_matrix: Union[np.ndarray, Any]
+) -> Union[float, cp.Expression]:
     """
-    Calculate the total portfolio variance (i.e square volatility).
-
-    :param w: asset weights in the portfolio
-    :type w: np.ndarray OR cp.Variable
-    :param cov_matrix: covariance matrix
-    :type cov_matrix: np.ndarray
-    :return: value of the objective function OR objective function expression
-    :rtype: float OR cp.Expression
+    Portfolio variance objective: w^T Σ w.
     """
-    variance = cp.quad_form(w, cov_matrix)
-    return _objective_value(w, variance)
+    expr = cp.quad_form(w, cov_matrix)
+    return _resolve_objective(w, expr)
 
 
-def portfolio_return(w, expected_returns, negative=True):
+def portfolio_return(
+    w: Union[np.ndarray, cp.Variable],
+    expected_returns: Union[np.ndarray, Any],
+    negative: bool = True
+) -> Union[float, cp.Expression]:
     """
-    Calculate the (negative) mean return of a portfolio
-
-    :param w: asset weights in the portfolio
-    :type w: np.ndarray OR cp.Variable
-    :param expected_returns: expected return of each asset
-    :type expected_returns: np.ndarray
-    :param negative: whether quantity should be made negative (so we can minimise) 
-    :type negative: boolean
-    :return: negative mean return
-    :rtype: float
+    Portfolio return objective (negative for minimisation).
+    R = w^T μ
     """
-    sign = -1 if negative else 1
-    mu = w @ expected_returns
-    return _objective_value(w, sign * mu)
+    sign = -1.0 if negative else 1.0
+    expr = w @ expected_returns * sign
+    return _resolve_objective(w, expr)
 
 
-def sharpe_ratio(w, expected_returns, cov_matrix, risk_free_rate=0.02, negative=True):
+def sharpe_ratio(
+    w: Union[np.ndarray, cp.Variable],
+    expected_returns: Union[np.ndarray, Any],
+    cov_matrix: Union[np.ndarray, Any],
+    risk_free_rate: float = DEFAULT_RISK_FREE_RATE,
+    negative: bool = True
+) -> Union[float, cp.Expression]:
     """
-    Calculate the (negative) Sharpe ratio of a portfolio
-
-    :param w: asset weights in the portfolio
-    :type w: np.ndarray OR cp.Variable
-    :param expected_returns: expected return of each asset
-    :type expected_returns: np.ndarray
-    :param cov_matrix: covariance matrix
-    :type cov_matrix: np.ndarray
-    :param risk_free_rate: risk-free rate of borrowing/lending, defaults to 0.02.
-                           The period of the risk-free rate should correspond to the
-                           frequency of expected returns.
-    :type risk_free_rate: float, optional
-    :param negative: whether quantity should be made negative (so we can minimise) 
-    :type negative: boolean
-    :return: (negative) Sharpe ratio
-    :rtype: float
+    Portfolio Sharpe ratio objective (negative for minimisation).
+    SR = (w^T μ - Rf) / sqrt(w^T Σ w)
     """
     mu = w @ expected_returns
     sigma = cp.sqrt(cp.quad_form(w, cov_matrix))
-    sign = -1 if negative else 1
-    sharpe = (mu - risk_free_rate) / sigma
-    return _objective_value(w, sign * sharpe)
+    expr = (mu - risk_free_rate) / sigma
+    if negative:
+        expr = -expr
+    return _resolve_objective(w, expr)
 
 
-def L2_reg(w, gamma=1):
-    r"""
-    L2 regularisation, i.e :math:`\gamma ||w||^2`, to increase the number of nonzero weights.
-
-    Example::
-
-        ef = EfficientFrontier(mu, S)
-        ef.add_objective(objective_functions.L2_reg, gamma=2)
-        ef.min_volatility()
-
-    :param w: asset weights in the portfolio
-    :type w: np.ndarray OR cp.Variable
-    :param gamma: L2 regularisation parameter, defaults to 1. Increase if you want more
-                    non-negligible weights
-    :type gamma: float, optional
-    :return: value of the objective function OR objective function expression
-    :rtype: float OR cp.Expression
+def L2_reg(
+    w: Union[np.ndarray, cp.Variable],
+    gamma: float = 1.0
+) -> Union[float, cp.Expression]:
     """
-    L2_reg = gamma * cp.sum_squares(w)
-    return _objective_value(w, L2_reg)
-
-
-def quadratic_utility(w, expected_returns, cov_matrix, risk_aversion, negative=True):
-    r"""
-    Quadratic utility function, i.e :math:`\mu - \frac 1 2 \delta  w^T \Sigma w`.
-
-    :param w: asset weights in the portfolio
-    :type w: np.ndarray OR cp.Variable
-    :param expected_returns: expected return of each asset
-    :type expected_returns: np.ndarray
-    :param cov_matrix: covariance matrix
-    :type cov_matrix: np.ndarray
-    :param risk_aversion: risk aversion coefficient. Increase to reduce risk.
-    :type risk_aversion: float
-    :param negative: whether quantity should be made negative (so we can minimise).
-    :type negative: boolean
-    :return: value of the objective function OR objective function expression
-    :rtype: float OR cp.Expression
+    L2 regularization: γ * ||w||^2.
     """
-    sign = -1 if negative else 1
+    expr = gamma * cp.sum_squares(w)
+    return _resolve_objective(w, expr)
+
+
+def quadratic_utility(
+    w: Union[np.ndarray, cp.Variable],
+    expected_returns: Union[np.ndarray, Any],
+    cov_matrix: Union[np.ndarray, Any],
+    risk_aversion: float,
+    negative: bool = True
+) -> Union[float, cp.Expression]:
+    """
+    Quadratic utility objective: μ - 0.5 * δ * w^T Σ w.
+    """
     mu = w @ expected_returns
-    variance = cp.quad_form(w, cov_matrix)
+    var = cp.quad_form(w, cov_matrix)
+    expr = mu - 0.5 * risk_aversion * var
+    if negative:
+        expr = -expr
+    return _resolve_objective(w, expr)
 
-    utility = mu - 0.5 * risk_aversion * variance
-    return _objective_value(w, sign * utility)
 
-
-def transaction_cost(w, w_prev, k=0.001):
+def transaction_cost(
+    w: Union[np.ndarray, cp.Variable],
+    w_prev: Union[np.ndarray, Any],
+    k: float = DEFAULT_TRANSACTION_COST
+) -> Union[float, cp.Expression]:
     """
-    A very simple transaction cost model: sum all the weight changes
-    and multiply by a given fraction (default to 10bps). This simulates
-    a fixed percentage commission from your broker.
-
-    :param w: asset weights in the portfolio
-    :type w: np.ndarray OR cp.Variable
-    :param w_prev: previous weights
-    :type w_prev: np.ndarray
-    :param k: fractional cost per unit weight exchanged
-    :type k: float
-    :return: value of the objective function OR objective function expression
-    :rtype: float OR cp.Expression
+    Transaction cost objective: k * ||w - w_prev||_1.
     """
-    return _objective_value(w, k * cp.norm(w - w_prev, 1))
+    expr = k * cp.norm1(w - w_prev)
+    return _resolve_objective(w, expr)

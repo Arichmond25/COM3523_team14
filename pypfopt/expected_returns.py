@@ -1,256 +1,197 @@
-"""
-The ``expected_returns`` module provides functions for estimating the expected returns of
-the assets, which is a required input in mean-variance optimisation.
+import logging
+from typing import Optional, Union
 
-By convention, the output of these methods is expected *annual* returns. It is assumed that
-*daily* prices are provided, though in reality the functions are agnostic
-to the time period (just change the ``frequency`` parameter). Asset prices must be given as
-a pandas dataframe, as per the format described in the :ref:`user-guide`.
-
-All of the functions process the price data into percentage returns data, before
-calculating their respective estimates of expected returns.
-
-Currently implemented:
-
-    - general return model function, allowing you to run any return model from one function.
-    - mean historical return
-    - exponentially weighted mean historical return
-    - CAPM estimate of returns
-
-Additionally, we provide utility functions to convert from returns to prices and vice-versa.
-"""
-
-import warnings
 import pandas as pd
 import numpy as np
 
+# Module constants
+DEFAULT_FREQUENCY = 252
 
-def returns_from_prices(prices, log_returns=False):
-    """
-    Calculate the returns given prices.
+logger = logging.getLogger(__name__)
 
-    :param prices: adjusted (daily) closing prices of the asset, each row is a
-                   date and each column is a ticker/id.
-    :type prices: pd.DataFrame
-    :param log_returns: whether to compute using log returns
-    :type log_returns: bool, defaults to False
-    :return: (daily) returns
-    :rtype: pd.DataFrame
+
+def _ensure_dataframe(data: Union[pd.DataFrame, np.ndarray]) -> pd.DataFrame:
     """
+    Ensure the input data is a pandas DataFrame. If an ndarray is provided, convert it.
+    Raises a ValueError if conversion is not possible.
+
+    :param data: Input data as DataFrame or ndarray
+    :return: DataFrame
+    """
+    if isinstance(data, pd.DataFrame):
+        return data
+    try:
+        return pd.DataFrame(data)
+    except Exception as e:
+        logger.error("Failed to convert data to DataFrame: %s", e)
+        raise ValueError("Input data must be a pandas DataFrame or convertible ndarray.")
+
+
+def returns_from_prices(
+    prices: Union[pd.DataFrame, np.ndarray],
+    log_returns: bool = False
+) -> pd.DataFrame:
+    """
+    Calculate period-over-period returns from price data.
+
+    :param prices: Asset prices (e.g., daily) as a DataFrame or ndarray
+    :param log_returns: If True, calculate log returns; otherwise, simple returns
+    :return: Returns DataFrame
+    """
+    prices_df = _ensure_dataframe(prices)
+    returns = prices_df.pct_change()
     if log_returns:
-        return np.log(1 + prices.pct_change()).dropna(how="all")
-    else:
-        return prices.pct_change().dropna(how="all")
+        returns = np.log1p(returns)
+    return returns.dropna(how="all")
 
 
-def log_returns_from_prices(prices):
+def prices_from_returns(
+    returns: Union[pd.DataFrame, np.ndarray],
+    log_returns: bool = False
+) -> pd.DataFrame:
     """
-    Calculate the log returns given prices.
+    Reconstruct pseudo-prices from returns, assuming initial value of 1.
 
-    :param prices: adjusted (daily) closing prices of the asset, each row is a
-                   date and each column is a ticker/id.
-    :type prices: pd.DataFrame
-    :return: (daily) returns
-    :rtype: pd.DataFrame
+    :param returns: Returns DataFrame or ndarray
+    :param log_returns: If True, interpret returns as log changes
+    :return: Pseudo-prices DataFrame
     """
-    warnings.warn(
-        "log_returns_from_prices is deprecated. Please use returns_from_prices(prices, log_returns=True)"
-    )
-    return np.log(1 + prices.pct_change()).dropna(how="all")
-
-
-def prices_from_returns(returns, log_returns=False):
-    """
-    Calculate the pseudo-prices given returns. These are not true prices because
-    the initial prices are all set to 1, but it behaves as intended when passed
-    to any PyPortfolioOpt method.
-
-    :param returns: (daily) percentage returns of the assets
-    :type returns: pd.DataFrame
-    :param log_returns: whether to compute using log returns
-    :type log_returns: bool, defaults to False
-    :return: (daily) pseudo-prices.
-    :rtype: pd.DataFrame
-    """
+    ret_df = _ensure_dataframe(returns)
     if log_returns:
-        returns = np.exp(returns)
-    ret = 1 + returns
-    ret.iloc[0] = 1  # set first day pseudo-price
-    return ret.cumprod()
+        ret_df = np.expm1(ret_df)
+    prices = (1 + ret_df).cumprod()
+    prices.iloc[0] = 1
+    return prices
 
 
-def return_model(prices, method="mean_historical_return", **kwargs):
+def return_model(
+    prices: Union[pd.DataFrame, np.ndarray],
+    method: str = "mean_historical_return",
+    **kwargs
+) -> pd.Series:
     """
-    Compute an estimate of future returns, using the return model specified in ``method``.
+    Compute an estimate of future annual returns based on the specified method.
 
-    :param prices: adjusted closing prices of the asset, each row is a date
-                   and each column is a ticker/id.
-    :type prices: pd.DataFrame
-    :param returns_data: if true, the first argument is returns instead of prices.
-    :type returns_data: bool, defaults to False.
-    :param method: the return model to use. Should be one of:
-
-        - ``mean_historical_return``
-        - ``ema_historical_return``
-        - ``capm_return``
-
-    :type method: str, optional
-    :raises NotImplementedError: if the supplied method is not recognised
-    :return: annualised sample covariance matrix
-    :rtype: pd.DataFrame
+    :param prices: Asset prices or returns (if returns_data=True)
+    :param method: One of 'mean_historical_return', 'ema_historical_return', 'capm_return'
+    :raises ValueError: if the method is not recognized
+    :return: Annualized returns as a Series
     """
-    if method == "mean_historical_return":
-        return mean_historical_return(prices, **kwargs)
-    elif method == "ema_historical_return":
-        return ema_historical_return(prices, **kwargs)
-    elif method == "capm_return":
-        return capm_return(prices, **kwargs)
-    else:
-        raise NotImplementedError("Return model {} not implemented".format(method))
+    methods = {
+        "mean_historical_return": mean_historical_return,
+        "ema_historical_return": ema_historical_return,
+        "capm_return": capm_return,
+    }
+    func = methods.get(method)
+    if func is None:
+        raise ValueError(f"Return model '{method}' is not implemented.")
+    return func(prices, **kwargs)
 
 
-def mean_historical_return(prices, returns_data=False, compounding=True, frequency=252):
+def mean_historical_return(
+    prices: Union[pd.DataFrame, np.ndarray],
+    returns_data: bool = False,
+    compounding: bool = True,
+    frequency: int = DEFAULT_FREQUENCY
+) -> pd.Series:
     """
-    Calculate annualised mean (daily) historical return from input (daily) asset prices.
-    By default, this uses the arithmetic mean (correct if log_returns are used).
+    Annualized mean historical return.
 
-    :param prices: adjusted closing prices of the asset, each row is a date
-                   and each column is a ticker/id.
-    :type prices: pd.DataFrame
-    :param returns_data: if true, the first argument is returns instead of prices.
-    :type returns_data: bool, defaults to False.
-    :param compounding: whether to properly compound the returns, optional.
-    :type compounding: bool, defaults to True
-    :param frequency: number of time periods in a year, defaults to 252 (the number
-                      of trading days in a year)
-    :type frequency: int, optional
-    :return: annualised mean (daily) return for each asset
-    :rtype: pd.Series
+    :param prices: Prices or returns data
+    :param returns_data: If True, 'prices' is actually returns
+    :param compounding: If True, compute compounded annual return
+    :param frequency: Periods per year
+    :return: Series of annual returns
     """
-    if not isinstance(prices, pd.DataFrame):
-        warnings.warn("prices are not in a dataframe", RuntimeWarning)
-        prices = pd.DataFrame(prices)
-    if returns_data:
-        returns = prices
-    else:
-        returns = returns_from_prices(prices)
+    data = _ensure_dataframe(prices)
+    returns = data if returns_data else returns_from_prices(data)
+
     if compounding:
-        return (1 + returns).prod() ** (frequency / returns.count()) - 1
+        compounded = (1 + returns).prod() ** (frequency / returns.count()) - 1
+        return compounded
     else:
         return returns.mean() * frequency
 
 
 def ema_historical_return(
-    prices, returns_data=False, compounding=True, span=500, frequency=252
-):
+    prices: Union[pd.DataFrame, np.ndarray],
+    returns_data: bool = False,
+    compounding: bool = True,
+    span: int = 500,
+    frequency: int = DEFAULT_FREQUENCY
+) -> pd.Series:
     """
-    Calculate the exponentially-weighted mean of (daily) historical returns, giving
-    higher weight to more recent data.
+    Annualized exponentially weighted mean return.
 
-    :param prices: adjusted closing prices of the asset, each row is a date
-                   and each column is a ticker/id.
-    :type prices: pd.DataFrame
-    :param returns_data: if true, the first argument is returns instead of prices.
-    :type returns_data: bool, defaults to False.
-    :param compounding: whether to properly compound the returns, optional.
-    :type compounding: bool, defaults to True
-    :param frequency: number of time periods in a year, defaults to 252 (the number
-                      of trading days in a year)
-    :type frequency: int, optional
-    :param span: the time-span for the EMA, defaults to 500-day EMA.
-    :type span: int, optional
-    :return: annualised exponentially-weighted mean (daily) return of each asset
-    :rtype: pd.Series
+    :param prices: Prices or returns data
+    :param returns_data: If True, 'prices' is actually returns
+    :param compounding: If True, compute compounded annual return
+    :param span: Span for the EMA
+    :param frequency: Periods per year
+    :return: Series of annual returns
     """
-    if not isinstance(prices, pd.DataFrame):
-        warnings.warn("prices are not in a dataframe", RuntimeWarning)
-        prices = pd.DataFrame(prices)
-    if returns_data:
-        returns = prices
-    else:
-        returns = returns_from_prices(prices)
+    data = _ensure_dataframe(prices)
+    returns = data if returns_data else returns_from_prices(data)
+    ewm_mean = returns.ewm(span=span).mean().iloc[-1]
 
     if compounding:
-        return (1 + returns.ewm(span=span).mean().iloc[-1]) ** frequency - 1
+        return (1 + ewm_mean) ** frequency - 1
     else:
-        return returns.ewm(span=span).mean().iloc[-1] * frequency
+        return ewm_mean * frequency
 
 
-def james_stein_shrinkage(prices, returns_data=False, compounding=True, frequency=252):
+def james_stein_shrinkage(*args, **kwargs):
+    """
+    Deprecated: James-Stein shrinkage is no longer supported.
+    """
     raise NotImplementedError(
-        "Deprecated because its implementation here was misguided."
+        "James-Stein shrinkage has been removed."
     )
 
 
 def capm_return(
-    prices,
-    market_prices=None,
-    returns_data=False,
-    risk_free_rate=0.02,
-    compounding=True,
-    frequency=252,
-):
+    prices: Union[pd.DataFrame, np.ndarray],
+    market_prices: Optional[Union[pd.DataFrame, np.ndarray]] = None,
+    returns_data: bool = False,
+    risk_free_rate: float = 0.02,
+    compounding: bool = True,
+    frequency: int = DEFAULT_FREQUENCY
+) -> pd.Series:
     """
-    Compute a return estimate using the Capital Asset Pricing Model. Under the CAPM,
-    asset returns are equal to market returns plus a :math:`\beta` term encoding
-    the relative risk of the asset.
+    Compute annualized CAPM returns: R = Rf + beta * (Rm - Rf)
 
-    .. math::
-
-        R_i = R_f + \\beta_i (E(R_m) - R_f)
-
-
-    :param prices: adjusted closing prices of the asset, each row is a date
-                    and each column is a ticker/id.
-    :type prices: pd.DataFrame
-    :param market_prices: adjusted closing prices of the benchmark, defaults to None
-    :type market_prices: pd.DataFrame, optional
-    :param returns_data: if true, the first arguments are returns instead of prices.
-    :type returns_data: bool, defaults to False.
-    :param risk_free_rate: risk-free rate of borrowing/lending, defaults to 0.02.
-                           You should use the appropriate time period, corresponding
-                           to the frequency parameter.
-    :type risk_free_rate: float, optional
-    :param compounding: whether to properly compound the returns, optional.
-    :type compounding: bool, defaults to True
-    :param frequency: number of time periods in a year, defaults to 252 (the number
-                        of trading days in a year)
-    :type frequency: int, optional
-    :return: annualised return estimate
-    :rtype: pd.Series
+    :param prices: Asset prices or returns
+    :param market_prices: Market benchmark prices or returns
+    :param returns_data: If True, inputs are returns
+    :param risk_free_rate: Annual risk-free rate
+    :param compounding: If True, compound returns
+    :param frequency: Periods per year
+    :return: Series of CAPM returns
     """
-    if not isinstance(prices, pd.DataFrame):
-        warnings.warn("prices are not in a dataframe", RuntimeWarning)
-        prices = pd.DataFrame(prices)
-    if returns_data:
-        returns = prices
-        market_returns = market_prices
+    asset_df = _ensure_dataframe(prices)
+    if not returns_data:
+        asset_ret = returns_from_prices(asset_df)
     else:
-        returns = returns_from_prices(prices)
-        if market_prices is not None:
-            market_returns = returns_from_prices(market_prices)
-        else:
-            market_returns = None
-    # Use the equally-weighted dataset as a proxy for the market
-    if market_returns is None:
-        # Append market return to right and compute sample covariance matrix
-        returns["mkt"] = returns.mean(axis=1)
-    else:
-        market_returns.columns = ["mkt"]
-        returns = returns.join(market_returns, how="left")
+        asset_ret = asset_df.copy()
 
-    # Compute covariance matrix for the new dataframe (including markets)
-    cov = returns.cov()
-    # The far-right column of the cov matrix is covariances to market
-    betas = cov["mkt"] / cov.loc["mkt", "mkt"]
-    betas = betas.drop("mkt")
-    # Find mean market return on a given time period
+    if market_prices is not None:
+        mkt_df = _ensure_dataframe(market_prices)
+        market_ret = (
+            mkt_df if returns_data
+            else returns_from_prices(mkt_df)
+        )
+        market_ret = market_ret.rename(columns={market_ret.columns[0]: 'mkt'})
+        asset_ret = asset_ret.join(market_ret, how='left')
+    else:
+        asset_ret['mkt'] = asset_ret.mean(axis=1)
+
+    cov = asset_ret.cov()
+    betas = cov.loc[asset_ret.columns.difference(['mkt']), 'mkt'] \
+            / cov.at['mkt', 'mkt']
+
     if compounding:
-        mkt_mean_ret = (1 + returns["mkt"]).prod() ** (
-            frequency / returns["mkt"].count()
-        ) - 1
+        mkt_mean = (1 + asset_ret['mkt']).prod() ** (frequency / asset_ret['mkt'].count()) - 1
     else:
-        mkt_mean_ret = returns["mkt"].mean() * frequency
+        mkt_mean = asset_ret['mkt'].mean() * frequency
 
-    # CAPM formula
-    return risk_free_rate + betas * (mkt_mean_ret - risk_free_rate)
+    return pd.Series(risk_free_rate + betas * (mkt_mean - risk_free_rate), name='capm')
