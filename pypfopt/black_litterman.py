@@ -7,6 +7,8 @@ views. In addition, two utility functions are defined, which calculate:
 - market-implied risk-aversion parameter
 """
 import sys
+import logging  # [ADDED]
+logger = logging.getLogger(__name__)  # [ADDED]
 import warnings
 import numpy as np
 import pandas as pd
@@ -80,6 +82,8 @@ def market_implied_risk_aversion(market_prices, frequency=252, risk_free_rate=0.
     var = rets.var() * frequency
     return (r - risk_free_rate) / var
 
+
+LARGE_UNCERTAINTY = 1e6  # [ADDED: Named constant for clarity]    
 
 class BlackLittermanModel(base_optimizer.BaseOptimizer):
 
@@ -254,7 +258,7 @@ class BlackLittermanModel(base_optimizer.BaseOptimizer):
 
     def _set_pi(self, pi, **kwargs):
         if pi is None:
-            warnings.warn("Running Black-Litterman with no prior.")
+            warnings.warn("Running Black-Litterman with no prior.", RuntimeWarning)  # [CHANGED: Added warning category]
             self.pi = np.zeros((self.n_assets, 1))
         elif isinstance(pi, (pd.Series, pd.DataFrame)):
             self.pi = pi.values.reshape(-1, 1)
@@ -375,8 +379,8 @@ class BlackLittermanModel(base_optimizer.BaseOptimizer):
 
             # Special handler to avoid dividing by zero.
             # If zero conf, return very big number as uncertainty
-            if conf == 0:
-                view_omegas.append(1e6)
+            if conf == 0:      
+                view_omegas.append(LARGE_UNCERTAINTY) # [CHANGED] Use named constant
                 continue
 
             P_view = P[view_idx].reshape(1, -1)
